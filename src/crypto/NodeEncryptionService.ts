@@ -1,6 +1,11 @@
 import * as crypto from 'crypto';
 import { IEncryptionService, Result, LocalizationService, CoreKeys } from '@ogza/core';
 
+/**
+ * NodeEncryptionService - AES-256-CBC şifreleme servisi
+ * 
+ * @implements {IEncryptionService}
+ */
 export class NodeEncryptionService implements IEncryptionService {
   private readonly algorithm = 'aes-256-cbc';
   private readonly key: Buffer;

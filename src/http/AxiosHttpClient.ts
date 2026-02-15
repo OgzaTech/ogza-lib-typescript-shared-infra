@@ -1,4 +1,11 @@
-import axios, { AxiosInstance, AxiosRequestConfig, AxiosResponse, AxiosError, InternalAxiosRequestConfig } from 'axios';
+import axios, { 
+  AxiosInstance, 
+  AxiosRequestConfig, 
+  AxiosResponse, 
+  AxiosError, 
+  InternalAxiosRequestConfig,
+  AxiosHeaders 
+} from 'axios';
 import { 
   IHttpClient, 
   IHttpRequest, 
@@ -15,8 +22,20 @@ import {
   UnexpectedError
 } from '@ogza/core';
 
+/**
+ * AxiosHttpClient - HTTP işlemleri için Infrastructure implementasyonu
+ * 
+ * Sorumluluklar:
+ * - HTTP isteklerini yönetme
+ * - Otomatik token enjeksiyonu
+ * - İsteğe bağlı şifreleme/şifre çözme
+ * - Merkezi hata yönetimi
+ * - Response interceptor'ları
+ * 
+ * @implements {IHttpClient}
+ */
 export class AxiosHttpClient implements IHttpClient {
-  private client: AxiosInstance;
+  private readonly client: AxiosInstance;
   private encryptionService?: IEncryptionService;
   private tokenProvider?: () => string | null;
 
@@ -25,121 +44,120 @@ export class AxiosHttpClient implements IHttpClient {
     encryptionService?: IEncryptionService,
     tokenProvider?: () => string | null
   ) {
-    this.client = axios.create(config);
+    this.client = axios.create({
+      timeout: 30000, // Default 30s timeout
+      ...config
+    });
     this.encryptionService = encryptionService;
     this.tokenProvider = tokenProvider;
     
-    // Modüler Kurulum
     this.initializeInterceptors();
   }
 
-  // DIŞARIDAN TOKEN PROVIDER SET ETMEK İÇİN
-  public setAuthTokenProvider(provider: () => string | null) {
+  /**
+   * Token provider'ı runtime'da set etmek için
+   * Özellikle login sonrası token güncellemelerinde kullanılır
+   */
+  public setAuthTokenProvider(provider: () => string | null): void {
     this.tokenProvider = provider;
   }
 
-  // TÜM INTERCEPTORLARI BAŞLATAN YÖNETİCİ
-  private initializeInterceptors() {
-    this.addTokenMiddleware();      // 1. Token Ekle
-    this.addEncryptionMiddleware(); // 2. Şifrele (Varsa)
-    this.addResponseMiddleware();   // 3. Cevabı İşle ve Hata Yönetimi
+  /**
+   * Tüm interceptor'ları sırayla başlat
+   * Sıralama önemli: Token -> Encryption -> Response handling
+   */
+  private initializeInterceptors(): void {
+    this.addTokenMiddleware();
+    this.addEncryptionMiddleware();
+    this.addResponseMiddleware();
   }
 
-  // ----------------------------------------------------------------
-  // 1. TOKEN MIDDLEWARE (Sadece Header Ekler)
-  // ----------------------------------------------------------------
-  private addTokenMiddleware() {
+  /**
+   * REQUEST INTERCEPTOR 1: Token Injection
+   * Her istekte otomatik olarak Authorization header'ı ekler
+   */
+  private addTokenMiddleware(): void {
     this.client.interceptors.request.use((config: InternalAxiosRequestConfig) => {
       if (!this.tokenProvider) return config;
 
       const token = this.tokenProvider();
       
-      if (token) {
-        // Axios v1.x uyumlu Header Ekleme
-        if (!config.headers) {
-          config.headers = {} as any;
-        }
-
-        const headers = config.headers as any;
-
-        // 'set' metodu varsa (AxiosHeaders class) onu kullan, yoksa direkt ata
-        if (typeof headers.set === 'function') {
-          headers.set('Authorization', `Bearer ${token}`);
-        } else {
-          headers['Authorization'] = `Bearer ${token}`;
-        }
+      if (token && config.headers) {
+        this.setHeader(config.headers, 'Authorization', `Bearer ${token}`);
       }
+      
       return config;
     });
   }
 
-  // ----------------------------------------------------------------
-  // 2. ENCRYPTION MIDDLEWARE (Sadece Şifreleme Yapar)
-  // ----------------------------------------------------------------
-  private addEncryptionMiddleware() {
-    // Request (Şifrele)
+  /**
+   * REQUEST/RESPONSE INTERCEPTOR 2: Encryption
+   * x-encrypt header'ı varsa request body'yi şifreler
+   * x-encrypted header'ı varsa response'u deşifreler
+   */
+  private addEncryptionMiddleware(): void {
+    // Request Encryption
     this.client.interceptors.request.use(async (config: InternalAxiosRequestConfig) => {
-      // Şifreleme servisi yoksa veya header'da istenmemişse geç
-      if (!this.encryptionService) return config;
+      if (!this.encryptionService || !config.headers) return config;
       
-      // AxiosHeaders kontrolü (get/delete veya array access)
-      const headers = config.headers as any;
-      const encryptHeader = headers['x-encrypt'] || (typeof headers.get === 'function' ? headers.get('x-encrypt') : null);
+      const shouldEncrypt = this.getHeader(config.headers, 'x-encrypt') === 'true';
 
-      if (encryptHeader === 'true') {
-        // Header'ı temizle
-        if (typeof headers.delete === 'function') headers.delete('x-encrypt');
-        else delete headers['x-encrypt'];
+      if (shouldEncrypt) {
+        this.deleteHeader(config.headers, 'x-encrypt');
 
-        // Body'yi şifrele
         if (config.data) {
           const stringBody = JSON.stringify(config.data);
           const encryptedResult = await this.encryptionService.encrypt(stringBody);
           
-          if (encryptedResult.isSuccess) {
-            config.data = { payload: encryptedResult.getValue() };
-          } else {
-            throw new Error(LocalizationService.t(CoreKeys.INFRA.ENCRYPTION_FAILED));
+          if (encryptedResult.isFailure) {
+            throw new Error(encryptedResult.error || LocalizationService.t(CoreKeys.INFRA.ENCRYPTION_FAILED));
           }
+          
+          config.data = { payload: encryptedResult.getValue() };
         }
       }
+      
       return config;
     });
 
-    // Response (Şifreyi Çöz)
-    this.client.interceptors.response.use(async (response) => {
+    // Response Decryption
+    this.client.interceptors.response.use(async (response: AxiosResponse) => {
       const isEncrypted = response.headers['x-encrypted'] === 'true';
       
       if (this.encryptionService && isEncrypted && response.data?.payload) {
-          const decryptedResult = await this.encryptionService.decrypt(response.data.payload);
-          
-          if (decryptedResult.isSuccess) {
-            try {
-               response.data = JSON.parse(decryptedResult.getValue());
-            } catch {
-               response.data = decryptedResult.getValue();
-            }
-          } else {
-             throw new Error(LocalizationService.t(CoreKeys.INFRA.DECRYPTION_FAILED));
-          }
+        const decryptedResult = await this.encryptionService.decrypt(response.data.payload);
+        
+        if (decryptedResult.isFailure) {
+          throw new Error(decryptedResult.error || LocalizationService.t(CoreKeys.INFRA.DECRYPTION_FAILED));
+        }
+        
+        try {
+          response.data = JSON.parse(decryptedResult.getValue());
+        } catch {
+          response.data = decryptedResult.getValue();
+        }
       }
+      
       return response;
     });
   }
 
-  // ----------------------------------------------------------------
-  // 3. RESPONSE & ERROR MIDDLEWARE
-  // ----------------------------------------------------------------
-  private addResponseMiddleware() {
+  /**
+   * RESPONSE INTERCEPTOR 3: Error Handling
+   * Hataları yakalayıp Promise.reject ile fırlatır
+   * Asıl error mapping handleAxiosError'da yapılır
+   */
+  private addResponseMiddleware(): void {
     this.client.interceptors.response.use(
-      (response) => response, // Başarılı cevapları olduğu gibi geçir
-      (error) => Promise.reject(error) // Hataları fırlat (handleAxiosError yakalayacak)
+      (response) => response,
+      (error) => Promise.reject(error)
     );
   }
 
-  // ----------------------------------------------------------------
-  // PUBLIC REQUEST METHOD
-  // ----------------------------------------------------------------
+  /**
+   * Ana HTTP request metodu
+   * Tüm HTTP metodları (GET, POST, PUT, DELETE) buradan geçer
+   */
   public async request<T>(options: IHttpRequest): Promise<Result<IHttpResponse<T>>> {
     try {
       const axiosConfig: AxiosRequestConfig = {
@@ -153,50 +171,155 @@ export class AxiosHttpClient implements IHttpClient {
 
       const response: AxiosResponse<T> = await this.client.request(axiosConfig);
 
-      const httpResponse: IHttpResponse<T> = {
-        data: response.data,
-        status: response.status,
-        statusText: response.statusText,
-        headers: response.headers as unknown as Record<string, string | string[]>
-      };
+      return Result.ok<IHttpResponse<T>>(this.mapResponse(response));
 
-      return Result.ok<IHttpResponse<T>>(httpResponse);
-
-    } catch (error: any) {
+    } catch (error: unknown) {
       return this.handleAxiosError<T>(error);
     }
   }
 
-  private handleAxiosError<T>(error: any): Result<IHttpResponse<T>> {
-    if (axios.isAxiosError(error)) {
-      const axiosError = error as AxiosError;
+  /**
+   * Axios response'unu IHttpResponse'a map eder
+   */
+  private mapResponse<T>(response: AxiosResponse<T>): IHttpResponse<T> {
+    return {
+      data: response.data,
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers as Record<string, string | string[]>
+    };
+  }
 
-      if (axiosError.response) {
-        const status = axiosError.response.status;
-        // Strapi hata formatı: error.message veya message
-        const data = axiosError.response.data as any;
-        const serverMessage = data?.error?.message || data?.message || axiosError.message; 
+  /**
+   * Axios hatalarını domain error'larına çevirir
+   * HTTP status code'lara göre uygun error türü döner
+   */
+  private handleAxiosError<T>(error: unknown): Result<IHttpResponse<T>> {
+    if (!axios.isAxiosError(error)) {
+      return Result.fail(LocalizationService.t(CoreKeys.INFRA.NETWORK_ERROR));
+    }
 
-        switch (status) {
-          case 400: return Result.fail(new ValidationError(serverMessage).message);
-          case 401: return Result.fail(new UnauthorizedError(serverMessage).message);
-          case 403: return Result.fail(new ForbiddenError(serverMessage).message);
-          case 404: return Result.fail(new NotFoundError(serverMessage || 'Resource').message);
-          case 503: return Result.fail(new ServiceUnavailableError(serverMessage).message);
-          default:  return Result.fail(new UnexpectedError(serverMessage || `HTTP ${status}`).message);
-        }
-      } 
-      else if (axiosError.request) {
-        if (axiosError.code === 'ECONNABORTED') return Result.fail(LocalizationService.t(CoreKeys.INFRA.TIMEOUT_ERROR));
-        return Result.fail(LocalizationService.t(CoreKeys.INFRA.NETWORK_ERROR));
-      }
+    const axiosError = error as AxiosError;
+
+    // Response var (sunucu cevap verdi ama hata kodu döndü)
+    if (axiosError.response) {
+      return this.handleResponseError(axiosError.response);
+    }
+
+    // Request gönderildi ama cevap alınamadı
+    if (axiosError.request) {
+      return this.handleRequestError(axiosError);
+    }
+
+    // İstek oluşturulurken hata
+    return Result.fail(LocalizationService.t(CoreKeys.INFRA.NETWORK_ERROR));
+  }
+
+  /**
+   * HTTP response error'larını işler (4xx, 5xx)
+   */
+  private handleResponseError<T>(response: AxiosResponse): Result<IHttpResponse<T>> {
+    const status = response.status;
+    const data = response.data as any;
+    const serverMessage = data?.error?.message || data?.message || response.statusText;
+
+    switch (status) {
+      case 400:
+        return Result.fail(new ValidationError(serverMessage).message);
+      case 401:
+        return Result.fail(new UnauthorizedError(serverMessage).message);
+      case 403:
+        return Result.fail(new ForbiddenError(serverMessage).message);
+      case 404:
+        return Result.fail(new NotFoundError(serverMessage || 'Resource').message);
+      case 503:
+        return Result.fail(new ServiceUnavailableError(serverMessage).message);
+      default:
+        return Result.fail(new UnexpectedError(serverMessage || `HTTP ${status}`).message);
+    }
+  }
+
+  /**
+   * Network error'larını işler (timeout, connection refused, vb.)
+   */
+  private handleRequestError<T>(error: AxiosError): Result<IHttpResponse<T>> {
+    if (error.code === 'ECONNABORTED') {
+      return Result.fail(LocalizationService.t(CoreKeys.INFRA.TIMEOUT_ERROR));
     }
     return Result.fail(LocalizationService.t(CoreKeys.INFRA.NETWORK_ERROR));
   }
 
-  // Helpers
-  public async get<T>(url: string, params?: any, headers?: any): Promise<Result<IHttpResponse<T>>> { return this.request<T>({ url, method: 'GET', params, headers }); }
-  public async post<T>(url: string, body: any, headers?: any): Promise<Result<IHttpResponse<T>>> { return this.request<T>({ url, method: 'POST', body, headers }); }
-  public async put<T>(url: string, body: any, headers?: any): Promise<Result<IHttpResponse<T>>> { return this.request<T>({ url, method: 'PUT', body, headers }); }
-  public async delete<T>(url: string, headers?: any): Promise<Result<IHttpResponse<T>>> { return this.request<T>({ url, method: 'DELETE', headers }); }
+  /**
+   * Type-safe header getter
+   * AxiosHeaders class'ı veya plain object her ikisini de destekler
+   */
+  private getHeader(headers: AxiosHeaders | Record<string, any>, key: string): string | null {
+    if (headers instanceof AxiosHeaders) {
+      return headers.get(key) as string | null;
+    }
+    return headers[key] || null;
+  }
+
+  /**
+   * Type-safe header setter
+   */
+  private setHeader(headers: AxiosHeaders | Record<string, any>, key: string, value: string): void {
+    if (headers instanceof AxiosHeaders) {
+      headers.set(key, value);
+    } else {
+      headers[key] = value;
+    }
+  }
+
+  /**
+   * Type-safe header deleter
+   */
+  private deleteHeader(headers: AxiosHeaders | Record<string, any>, key: string): void {
+    if (headers instanceof AxiosHeaders) {
+      headers.delete(key);
+    } else {
+      delete headers[key];
+    }
+  }
+
+  // ==================== CONVENIENCE METHODS ====================
+
+  public async get<T>(
+    url: string, 
+    params?: any, 
+    headers?: Record<string, string>
+  ): Promise<Result<IHttpResponse<T>>> {
+    return this.request<T>({ url, method: 'GET', params, headers });
+  }
+
+  public async post<T>(
+    url: string, 
+    body: any, 
+    headers?: Record<string, string>
+  ): Promise<Result<IHttpResponse<T>>> {
+    return this.request<T>({ url, method: 'POST', body, headers });
+  }
+
+  public async put<T>(
+    url: string, 
+    body: any, 
+    headers?: Record<string, string>
+  ): Promise<Result<IHttpResponse<T>>> {
+    return this.request<T>({ url, method: 'PUT', body, headers });
+  }
+
+  public async delete<T>(
+    url: string, 
+    headers?: Record<string, string>
+  ): Promise<Result<IHttpResponse<T>>> {
+    return this.request<T>({ url, method: 'DELETE', headers });
+  }
+
+  public async patch<T>(
+    url: string, 
+    body: any, 
+    headers?: Record<string, string>
+  ): Promise<Result<IHttpResponse<T>>> {
+    return this.request<T>({ url, method: 'PATCH', body, headers });
+  }
 }

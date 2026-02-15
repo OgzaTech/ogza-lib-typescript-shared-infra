@@ -1,6 +1,11 @@
 import * as bcrypt from 'bcrypt';
 import { IHashingService, Result, LocalizationService, CoreKeys } from '@ogza/core';
 
+/**
+ * BcryptHashingService - Bcrypt kullanarak password hashing
+ * 
+ * @implements {IHashingService}
+ */
 export class BcryptHashingService implements IHashingService {
   private readonly saltRounds = 10;
 
@@ -19,7 +24,6 @@ export class BcryptHashingService implements IHashingService {
       const match = await bcrypt.compare(plainText, hashedValue);
       return Result.ok(match);
     } catch (err: any) {
-      // Compare başarısızlığı (şifre yanlış değil, süreç hatası)
       const msg = LocalizationService.t(CoreKeys.INFRA.HASHING_FAILED);
       return Result.fail(`${msg}: ${err.message}`);
     }

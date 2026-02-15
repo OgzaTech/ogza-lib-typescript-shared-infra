@@ -1,5 +1,10 @@
 import { ICookieAdapter, CookieOptions } from '@ogza/core';
 
+/**
+ * WebCookieAdapter - Browser cookie yönetimi
+ * 
+ * @implements {ICookieAdapter}
+ */
 export class WebCookieAdapter implements ICookieAdapter {
   
   get(name: string): string | null {
