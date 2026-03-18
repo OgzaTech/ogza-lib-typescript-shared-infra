@@ -20,11 +20,18 @@ export class BcryptHashingService implements IHashingService {
   }
 
   async compare(plainText: string, hashedValue: string): Promise<Result<boolean>> {
+    console.log("BcryptHashingService Compare Method")
     try {
+      console.log(plainText)
+      console.log(hashedValue)
+
       const match = await bcrypt.compare(plainText, hashedValue);
+      console.log("BcryptHashingService Compare Method - Match %s" , match)
+
       return Result.ok(match);
     } catch (err: any) {
       const msg = LocalizationService.t(CoreKeys.INFRA.HASHING_FAILED);
+      console.log(`${msg}: ${err.message}`)
       return Result.fail(`${msg}: ${err.message}`);
     }
   }
