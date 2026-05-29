@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
   "exports": {
     ".": {
       "import": "./dist/index.mjs",
@@ -20,10 +23,11 @@
     "dev": "tsc --watch",
     "test": "vitest run --coverage",
     "test:watch": "vitest watch",
-    "test:ui": "vitest --ui"
+    "test:ui": "vitest --ui",
+    "prepare": "npm run build"
   },
   "dependencies": {
-    "@ogza/core": "*",
+    "@ogza/core": "git+https://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@github.com/OgzaTech/ogza-lib-typescript-core.git#v0.0.1",
     "axios": "^1.6.0",
     "bcrypt": "^6.0.0",
     "jsonwebtoken": "^9.0.2",
