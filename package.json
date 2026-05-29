@@ -27,7 +27,7 @@
     "prepare": "npm run build"
   },
   "dependencies": {
-    "@ogza/core": "git+https://g*****@github.com/OgzaTech/ogza-lib-typescript-core.git#v0.0.1",
+    "@ogza/core": "*",
     "axios": "^1.6.0",
     "bcrypt": "^6.0.0",
     "jsonwebtoken": "^9.0.2",
