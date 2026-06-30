@@ -7,6 +7,7 @@ export * from './crypto/BcryptHashingService';
 
 // Authentication
 export * from './auth/JwtTokenService';
+export * from './auth/Rs256TokenService';
 
 // Configuration
 export * from './config/EnvAppConfig';
