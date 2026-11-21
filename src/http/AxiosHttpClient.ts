@@ -19,8 +19,17 @@ import {
   ForbiddenError,
   NotFoundError,
   ServiceUnavailableError,
-  UnexpectedError
+  UnexpectedError,
+  ConflictError
 } from '@ogza/core';
+
+/**
+ * 401 alındığında çağrılır. Token yenilendiyse true döner; istek bir kez tekrarlanır.
+ * Handler fırlatmamalı; fırlatırsa false kabul edilir.
+ */
+export type UnauthorizedHandler = () => Promise<boolean>;
+
+type RetriableRequestConfig = InternalAxiosRequestConfig & { _retried?: boolean };
 
 /**
  * AxiosHttpClient - HTTP işlemleri için Infrastructure implementasyonu
@@ -38,6 +47,8 @@ export class AxiosHttpClient implements IHttpClient {
   private readonly client: AxiosInstance;
   private encryptionService?: IEncryptionService;
   private tokenProvider?: () => string | null;
+  private unauthorizedHandler?: UnauthorizedHandler;
+  private refreshInFlight: Promise<boolean> | null = null;
 
   constructor(
     config?: AxiosRequestConfig, 
@@ -60,6 +71,14 @@ export class AxiosHttpClient implements IHttpClient {
    */
   public setAuthTokenProvider(provider: () => string | null): void {
     this.tokenProvider = provider;
+  }
+
+  /**
+   * 401 handler'ını runtime'da set etmek için (örn. refresh token akışı).
+   * Eşzamanlı 401'lerde handler tek sefer çalışır, bekleyen istekler sonucu paylaşır.
+   */
+  public setUnauthorizedHandler(handler: UnauthorizedHandler | undefined): void {
+    this.unauthorizedHandler = handler;
   }
 
   /**
@@ -150,7 +169,30 @@ export class AxiosHttpClient implements IHttpClient {
   private addResponseMiddleware(): void {
     this.client.interceptors.response.use(
       (response) => response,
-      (error) => Promise.reject(error)
+      async (error: unknown) => {
+        if (!axios.isAxiosError(error) || error.response?.status !== 401 || !this.unauthorizedHandler) {
+          return Promise.reject(error);
+        }
+
+        const config = error.config as RetriableRequestConfig | undefined;
+        if (!config || config._retried) {
+          return Promise.reject(error);
+        }
+        config._retried = true;
+
+        const handler = this.unauthorizedHandler;
+        this.refreshInFlight ??= handler()
+          .catch(() => false)
+          .finally(() => { this.refreshInFlight = null; });
+
+        const refreshed = await this.refreshInFlight;
+        if (!refreshed) {
+          return Promise.reject(error);
+        }
+
+        // Token middleware yeni token'ı tekrar enjekte eder
+        return this.client.request(config);
+      }
     );
   }
 
@@ -232,6 +274,8 @@ export class AxiosHttpClient implements IHttpClient {
         return Result.fail(new ForbiddenError(serverMessage).message);
       case 404:
         return Result.fail(new NotFoundError(serverMessage || 'Resource').message);
+      case 409:
+        return Result.fail(new ConflictError(serverMessage).message);
       case 503:
         return Result.fail(new ServiceUnavailableError(serverMessage).message);
       default:
